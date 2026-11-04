@@ -1,18 +1,18 @@
 # AI File Sorting & Archiving Pipeline
 
-Sortare non-destructivă a unui dataset personal mare cu un VLM local (LM Studio / Bionic,
-API compatibil OpenAI). Scriptul **copiază** fișierele într-un folder destinație, le
-clasifică cu AI și le redenumește descriptiv — **originalele nu sunt niciodată modificate
-sau șterse**.
+Non-destructive sorting of a large personal dataset with a local vision-language model
+(LM Studio / Bionic, OpenAI-compatible API). The script **copies** files into a
+destination folder, classifies them with the AI, and renames them descriptively —
+**originals are never modified or deleted**.
 
-## Structură
+## Project structure
 
 ```
-sort_files.py            # pipeline-ul principal de sortare (AI + copiere + log CSV)
-count_sorted_files.py    # statistici & audit pentru folderul sortat (CSV raport)
-sorter_utils.py          # helperi partajați (clean_name, safe_copy, căi lungi Windows)
-requirements.txt         # dependențe
-tests/                   # suite pytest (rulează fără server AI, cu client mock)
+sort_files.py            # main pipeline (AI classification + copy + CSV log)
+count_sorted_files.py    # stats & audit report for the sorted folder (CSV)
+sorter_utils.py          # shared helpers (clean_name, safe_copy, Windows long paths)
+requirements.txt         # dependencies
+tests/                   # pytest suite (runs without an AI server, mocked client)
 ```
 
 ## Setup
@@ -21,61 +21,61 @@ tests/                   # suite pytest (rulează fără server AI, cu client mo
 pip install -r requirements.txt
 ```
 
-Server local: LM Studio / Bionic pe `http://127.0.0.1:1235/v1`, model `qwen2.5-vl-7b-instruct`,
-context 4096–8192, Flash Attention ON, 100% GPU offload.
+Local AI server: LM Studio / Bionic on `http://127.0.0.1:1235/v1`, model
+`qwen2.5-vl-7b-instruct`, context 4096–8192, Flash Attention ON, 100% GPU offload.
 
-## Utilizare
+## Usage
 
 ```bat
-:: rulare completă cu căile implicite (Z:\To be sorted V1 -> Z:\Sorted)
+:: full run with default paths (Z:\To be sorted V1 -> Z:\Sorted)
 python sort_files.py
 
-:: căi custom
+:: custom paths
 python sort_files.py --source "D:\in" --dest "D:\out"
 
-:: doar primele 50 de fișiere neprocesate (util pentru testarea calității)
+:: only the first 50 unprocessed files (useful for checking quality)
 python sort_files.py --limit 50
 
-:: dry-run: afișează deciziile AI fără să copieze și fără să scrie în log
+:: dry-run: prints the AI decisions, copies nothing, writes no log
 python sort_files.py --dry-run --limit 100
 
-:: statistici pentru folderul sortat
+:: statistics for the sorted folder
 python count_sorted_files.py --target "Z:\Sorted"
 ```
 
-Opțiuni: `--source --dest --log --api-url --model --limit --dry-run` (vezi `--help`).
+Options: `--source --dest --log --api-url --model --limit --dry-run` (see `--help`).
 
-## Reguli de sortare
+## Sorting rules
 
-- **Non-destructiv**: doar `shutil.copy2` din sursă în destinație.
-- **Junk automat**: foldere de sistem (`node_modules`, `.git`, `AppData`, `Temp`...), extensii
-  `.tmp/.log/.ini/.bak...` și fișiere < 200 bytes merg direct în `Sorted\to be deleted`, fără AI.
-- **Nume**: `[Tip Document] [Firmă/Persoană] [Detalii] ([stem original]).ext`, cu spații.
-- **Anti-fragmentare**: subfolderul (`subiect`) e doar tipul general de document
-  (`Financiar\Facturi`, nu câte un folder per bancă). Firma/banca intră în **numele fișierului**.
-- **Resume la crash**: fiecare fișier copiat e logat imediat în `sorting_log.csv`
-  (căi normalizate case-insensitive); la relansare, cele logate sunt sărite instant.
-  Fișierele la care copierea a eșuat **nu** sunt marcate ca procesate — sunt în
-  `sorting_errors.csv` și se reîncearcă automat la următoarea rulare.
-- **Căi lungi Windows**: suport `\\?\` (până la 32.767 caractere) + fallback pe nume scurt;
-  nu se suprascrie niciodată un fișier existent (se adaugă ` (1)`, ` (2)`...).
+- **Non-destructive**: only `shutil.copy2` from source to destination.
+- **Automatic junk**: system folders (`node_modules`, `.git`, `AppData`, `Temp`...), extensions
+  `.tmp/.log/.ini/.bak...` and files < 200 bytes go straight to `Sorted\to be deleted`, without AI.
+- **Naming**: `[Document Type] [Company/Person] [Short Details] ([original stem]).ext`, with spaces.
+- **Anti-fragmentation**: the subfolder (`subiect`) is only the broad document type
+  (`Financiar\Facturi`, not one folder per bank). The company/bank goes into the **file name**.
+- **Crash-safe resume**: every copied file is logged immediately to `sorting_log.csv`
+  (paths normalized, case-insensitive); on restart, logged files are skipped instantly.
+  Files whose copy failed are **not** marked as processed — they go to `sorting_errors.csv`
+  and are retried automatically on the next run.
+- **Long Windows paths**: handled via the `\\?\` prefix (up to 32,767 chars) + short-name
+  fallback; existing files are never overwritten (` (1)`, ` (2)`... suffixes are added).
 
-## Extracție de conținut înainte de AI
+## Content extraction before the AI call
 
-PDF (text din primele 2 pagini, sau OCR vizual la 120 DPI dacă e scan), `.docx`, `.pptx`,
-`.xlsx` (primele 15 rânduri), imagini (thumbnail 768px JPEG q80), `.doc/.ppt/.exe/.msi`
-(stringuri ASCII/UTF-16 din binar), `.torrent` (bencode `4:name`), `.zip/.jar/.apk`
-(lista de fișiere), text (utf-8 → cp1252 fallback). Payload limitat la 1200 caractere,
-`max_tokens=90`, `temperature=0.0` (+ o reîncercare cu 240 tokeni dacă JSON-ul e trunchiat).
+PDF (text from the first 2 pages, or visual OCR at 120 DPI if scanned), `.docx`, `.pptx`,
+`.xlsx` (first 15 rows), images (768px JPEG q80 thumbnail), `.doc/.ppt/.exe/.msi`
+(ASCII/UTF-16 strings from the binary), `.torrent` (bencode `4:name`), `.zip/.jar/.apk`
+(file listing), plain text (utf-8 → cp1252 fallback). Payload capped at 1200 chars,
+`max_tokens=90`, `temperature=0.0` (+ one retry with 240 tokens if the JSON is truncated).
 
-## Teste
+## Tests
 
 ```bat
 pip install pytest
 python -m pytest tests/ -q
 ```
 
-Testele rulează local, fără server AI (client OpenAI mock) și fără căi `Z:\`.
+Tests run locally, without an AI server (mocked OpenAI client) and without `Z:\` paths.
 
 ## Troubleshooting: "Import could not be resolved" in VS Code
 
@@ -85,32 +85,34 @@ when the selected interpreter is not the one where the dependencies were install
 the script still runs fine from an interpreter that has the packages. To fix:
 
 1. `Ctrl+Shift+P` → **Python: Select Interpreter** → choose your global Python 3.13
-   (find its path in a terminal with: `py -3.13 -c "import sys; print(sys.executable)"`).
+   (find its path in a terminal: `py -3.13 -c "import sys; print(sys.executable)"`).
 2. Or install the deps into the currently selected interpreter instead:
    `python -m pip install -r requirements.txt`
 3. Verify: `python -c "import openai, pymupdf, docx, pptx, openpyxl, PIL; print('ok')"`
-4. If the warnings persist after switching: `Ctrl+Shift+P` → **Developer: Reload Window**.
-
-## Istoric (față de varianta din chat-ul Gemini)
-
-1. Copierile eșuate nu mai sunt logate ca "procesate" — se reîncearcă la relansare
-   (înainte erau sărite definitiv, pierzând fișiere).
-2. Parsare JSON robustă (extrage obiectul dintre prima `{` și ultima `}`) + reîncercare
-   cu `max_tokens=240` când răspunsul e trunchiat; înainte ajungeau silențios în `Unknown`.
-3. `safe_copy` nu mai poate suprascrie un fișier existent (fallback-ul vechi suprascria).
-4. Categorii/subiecte goale → fallback `Unknown`; verificări `\\?\` și la `os.path.exists`.
-5. CLI cu `--source/--dest/--log/--model/--limit/--dry-run` (dry-run util pentru tuning de prompt).
-6. Mesaj clar când `sorting_log.csv` e blocat (deschis în Excel / proces zombie).
-7. Extensii suplimentare (`.gif/.tif/.svg/.yaml`, arhive zip-based `.jar/.apk`), citire text
-   cu fallback de encoding, `pymupdf` importat cu fallback la `fitz`.
-8. Stats: relative paths robust to the `\\?\` prefix, new "Top 20 files by size" section,
-   log/error CSVs excluded from counts.
+4. If warnings persist after switching: `Ctrl+Shift+P` → **Developer: Reload Window**.
 
 ## Language convention
 
 Code, comments, console output, CSV log/report headers and commit messages are in English.
-Kept in Romanian on purpose (context-dependent): the AI system prompt and JSON keys in
+Kept in Romanian on purpose (context-dependent): the AI system prompt and the JSON keys in
 `sort_files.py` (the model must classify in Romanian, so category/subfolder names come out
 in Romanian), the `to be deleted` folder name, and the existing CSV filenames
 (`sorting_log.csv`, `sorting_errors.csv`, `statistici_fisiere.csv`) so already-sorted data
 on the drive keeps matching on resume.
+
+## Changelog (vs. the Gemini-chat version)
+
+1. Failed copies are no longer logged as "processed" — they are retried on the next run
+   (before, they were skipped forever, losing files).
+2. Robust JSON parsing (extracts the object between the first `{` and last `}`) + one retry
+   with `max_tokens=240` when the answer is truncated; before, they silently landed in `Unknown`.
+3. `safe_copy` can never overwrite an existing file (the old fallback silently overwrote).
+4. Empty/illegal category or subfolder from the AI → fallback to `Unknown`; `\\?\` prefix
+   also used in `os.path.exists` checks.
+5. CLI with `--source/--dest/--log/--model/--limit/--dry-run` (dry-run is useful for prompt
+   tuning before the full run).
+6. Clear error when `sorting_log.csv` is locked (open in Excel / zombie process).
+7. More extensions handled (`.gif/.tif/.svg/.yaml`, zip-based `.jar/.apk`), text reading with
+   encoding fallback, `pymupdf` imported with fallback to `fitz`.
+8. Stats: relative paths robust to the `\\?\` prefix, new "Top 20 files by size" section,
+   log/error CSVs excluded from counts.
