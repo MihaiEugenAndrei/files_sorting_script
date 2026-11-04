@@ -89,5 +89,14 @@ Testele rulează local, fără server AI (client OpenAI mock) și fără căi `Z
 6. Mesaj clar când `sorting_log.csv` e blocat (deschis în Excel / proces zombie).
 7. Extensii suplimentare (`.gif/.tif/.svg/.yaml`, arhive zip-based `.jar/.apk`), citire text
    cu fallback de encoding, `pymupdf` importat cu fallback la `fitz`.
-8. Statistici: cale relativă robustă la prefixul `\\?\`, secțiune nouă "Top 20 fișiere ca
-   dimensiune", log-urile și erorile excluse din numărătoare.
+8. Stats: relative paths robust to the `\\?\` prefix, new "Top 20 files by size" section,
+   log/error CSVs excluded from counts.
+
+## Language convention
+
+Code, comments, console output, CSV log/report headers and commit messages are in English.
+Kept in Romanian on purpose (context-dependent): the AI system prompt and JSON keys in
+`sort_files.py` (the model must classify in Romanian, so category/subfolder names come out
+in Romanian), the `to be deleted` folder name, and the existing CSV filenames
+(`sorting_log.csv`, `sorting_errors.csv`, `statistici_fisiere.csv`) so already-sorted data
+on the drive keeps matching on resume.

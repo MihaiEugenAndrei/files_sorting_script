@@ -32,7 +32,7 @@ def test_scan_and_report(tmp_path):
     flat = {tuple(r[:2]) for r in rows}
 
     # sumar general: 3 fișiere (log-ul e ignorat), 2 extensii, 3058 bytes
-    summary = next(r for r in rows if r and r[0] == "Total Fișiere Sortate")
+    summary = next(r for r in rows if r and r[0] == "Total Sorted Files")
     assert summary is not None
     total_row = rows[rows.index(summary) + 1]
     assert total_row[0] == "3"

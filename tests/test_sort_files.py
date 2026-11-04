@@ -57,19 +57,19 @@ class TestJunkReason:
     def test_junk_extension(self, tmp_path):
         f = tmp_path / "a.log"
         f.write_text("x" * 500)
-        assert junk_reason(f) == "extensie_junk"
+        assert junk_reason(f) == "junk_extension"
 
     def test_too_small(self, tmp_path):
         f = tmp_path / "a.txt"
         f.write_text("hi")
-        assert junk_reason(f) == "prea_mic"
+        assert junk_reason(f) == "too_small"
 
     def test_ignored_dir(self, tmp_path):
         d = tmp_path / "node_modules"
         d.mkdir()
         f = d / "a.js"
         f.write_text("x" * 500)
-        assert junk_reason(f) == "director_ignorat"
+        assert junk_reason(f) == "ignored_dir"
 
     def test_normal_file(self, tmp_path):
         f = tmp_path / "a.txt"
@@ -115,7 +115,7 @@ class TestEndToEnd:
 
         # log: header + 5 intrări
         rows = read_log(dest / "sorting_log.csv")
-        assert rows[0] == ["Cale_Originala", "Mod", "Categorie", "Subiect", "Cale_Noua"]
+        assert rows[0] == ["Source_Path", "Mode", "Category", "Subject", "New_Path"]
         assert len(rows) == 6
 
         # RESUME: a doua rulare nu mai apelează AI și nu mai copiază nimic

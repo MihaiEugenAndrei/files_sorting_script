@@ -1,4 +1,4 @@
-"""Helperi partajate intre sort_files.py si count_sorted_files.py."""
+"""Shared helpers for sort_files.py and count_sorted_files.py."""
 
 import os
 import re
@@ -10,7 +10,7 @@ LONG_PATH_PREFIX = "\\\\?\\"
 
 
 def clean_name(text, max_len: int = 65) -> str:
-    """Curata un string pentru a fi folosit ca nume de fisier/folder pe Windows."""
+    """Sanitize a string for use as a Windows file/folder name."""
     if not text:
         return ""
     text = INVALID_CHARS_RE.sub("", str(text))
@@ -21,12 +21,12 @@ def clean_name(text, max_len: int = 65) -> str:
 
 
 def normalize_path(p) -> str:
-    """Normalizare pentru comparatii exacte de cai (case-insensitive pe Windows)."""
+    """Normalize a path for exact comparisons (case-insensitive on Windows)."""
     return os.path.normcase(os.path.normpath(str(p)))
 
 
 def win_long_path(p) -> str:
-    """Prepend \\?\\ pe Windows pentru cai > 260 caractere."""
+    """Prepend \\?\\ on Windows so paths > 260 chars work."""
     abs_str = os.path.abspath(str(p))
     if os.name == "nt" and not abs_str.startswith(LONG_PATH_PREFIX):
         return LONG_PATH_PREFIX + abs_str
@@ -40,26 +40,26 @@ def strip_long_path_prefix(p: str) -> str:
 
 
 def unique_destination(target_folder: Path, stem: str, ext: str) -> Path:
-    """Gaseste un nume de destinatie nefolosit; nu suprascrie niciodata."""
+    """Find an unused destination name; never overwrites an existing file."""
     candidate = target_folder / f"{stem}{ext}"
     counter = 1
     while os.path.exists(win_long_path(candidate)):
         candidate = target_folder / f"{stem} ({counter}){ext}"
         counter += 1
         if counter > 9999:
-            raise RuntimeError(f"Prea multe coliziuni de nume in {target_folder}")
+            raise RuntimeError(f"Too many name collisions in {target_folder}")
     return candidate
 
 
 def safe_copy(src: Path, target_folder: Path, desired_filename: str, max_stem: int = 85) -> Path:
-    """Copie non-destructiva cu suport cai lungi si fallback pe nume scurt.
+    """Non-destructive copy with long-path support and a short-name fallback.
 
-    Nu suprascrie fisiere existente; intoarce calea efectiva de destinatie.
+    Never overwrites existing files; returns the actual destination path.
     """
     target_long = win_long_path(target_folder)
     os.makedirs(target_long, exist_ok=True)
 
-    stem = clean_name(Path(desired_filename).stem, max_len=max_stem) or "fara_nume"
+    stem = clean_name(Path(desired_filename).stem, max_len=max_stem) or "unnamed"
     ext = Path(desired_filename).suffix.lower()[:10]
 
     dest_path = unique_destination(target_folder, stem, ext)

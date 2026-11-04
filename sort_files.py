@@ -1,18 +1,23 @@
 r"""AI file sorting pipeline (non-destructive copy + local VLM renaming).
 
-Citeste fisierele din SOURCE_DIR, extrage continutul (text/OCR/imagine), cere unui
-VLM local (LM Studio / Bionic, API compatibil OpenAI) o clasificare JSON, si copiaza
-fiecare fisier in DEST_DIR/<Categorie>/<Subiect>/<nume_nou> (<stem original>).ext.
-Originalele nu sunt niciodata modificate sau sterse.
+Reads files from SOURCE_DIR, extracts content (text/OCR/image), asks a local VLM
+(LM Studio / Bionic, OpenAI-compatible API) for a JSON classification, and copies
+each file to DEST_DIR/<Category>/<Subject>/<new_name> (<original stem>).ext.
+Originals are never modified or deleted.
 
-Siguranta la crash: fiecare fisier copiat cu succes este logat imediat in CSV.
-La repornire, fisierele deja logate sunt sarite instant. Fisierele la care copierea
-a esuat NU sunt marcate ca procesate (sunt in sorting_errors.csv si se reincearca).
+Crash safety: every successfully copied file is logged immediately to CSV.
+On restart, logged files are skipped instantly. Files whose copy FAILED are not
+marked as processed (they go to sorting_errors.csv and are retried).
 
-Utilizare:
-    python sort_files.py                          # configuratia implicita (Z:\\...)
+Usage:
+    python sort_files.py                          # default config (Z:\...)
     python sort_files.py --source D:\in --dest D:\out
-    python sort_files.py --dry-run --limit 50     # doar propune mutarile, nu copiaza
+    python sort_files.py --dry-run --limit 50     # only show proposed moves, copy nothing
+
+Language note: code, logs and CLI output are in English. The system prompt and the
+JSON keys stay in Romanian on purpose — the model must classify in Romanian, so
+category/subfolder names come out in Romanian. The "to be deleted" folder name and
+the log CSV filenames are kept unchanged to stay compatible with already-sorted data.
 """
 
 import argparse
@@ -32,7 +37,7 @@ from PIL import Image
 
 try:
     import pymupdf as fitz
-except ImportError:  # PyMuPDF mai vechi
+except ImportError:  # older PyMuPDF
     import fitz
 import docx
 from pptx import Presentation
@@ -40,7 +45,7 @@ from pptx import Presentation
 from sorter_utils import clean_name, normalize_path, safe_copy, win_long_path
 
 # =====================================================================
-# 1. CONFIGURARE IMPLICITA (poate fi suprascrisa din CLI)
+# 1. DEFAULT CONFIG (can be overridden via CLI)
 # =====================================================================
 DEFAULT_SOURCE = r"Z:\To be sorted V1"
 DEFAULT_DEST = r"Z:\Sorted"
@@ -53,7 +58,7 @@ IGNORED_DIRS = {
 }
 
 JUNK_EXTENSIONS = {".tmp", ".bak", ".crdownload", ".part", ".dmp", ".log", ".ini"}
-MIN_FILE_SIZE = 200  # fisiere mai mici merg direct in "to be deleted"
+MIN_FILE_SIZE = 200  # smaller files go straight to "to be deleted"
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".xml", ".py", ".js", ".html", ".svg", ".yaml", ".yml"}
@@ -64,7 +69,10 @@ MAX_TOKENS = 90
 MAX_TOKENS_RETRY = 240
 
 # =====================================================================
-# 2. PROMPT SISTEM — GRUPARE LARGA (FARA SUBFOLDERE PER FIRMA)
+# 2. SYSTEM PROMPT — kept in Romanian on purpose: the model must classify
+#    in Romanian (broad grouping, NO per-company subfolders).
+#    JSON keys (categorie/subiect/nume_nou/pastreaza_original) are part of
+#    this contract and must stay Romanian.
 # =====================================================================
 SYSTEM_PROMPT = """Ești un arhivar digital expert. Clasifică fișierul logic și concis în limba română.
 
@@ -103,10 +111,10 @@ Răspunde DOAR cu JSON brut:
 
 
 # =====================================================================
-# 3. EXTRACTOARE DE CONTINUT
+# 3. CONTENT EXTRACTORS
 # =====================================================================
 def extract_strings_from_binary(filepath: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
-    """Extragere rapidă din binare (.doc/.ppt vechi, .exe, .msi)."""
+    """Fast extraction from binaries (legacy .doc/.ppt, .exe, .msi)."""
     try:
         with open(filepath, "rb") as f:
             raw = f.read(250000)
@@ -114,11 +122,11 @@ def extract_strings_from_binary(filepath: Path, max_chars: int = MAX_TEXT_CHARS)
         utf16_strings = re.findall(b"(?:[\x20-\x7E]\x00){4,}", raw)
         decoded = [s.decode("ascii", "ignore") for s in ascii_strings]
         decoded += [s.decode("utf-16le", "ignore") for s in utf16_strings]
-        cuvinte_utile = [
+        useful = [
             w.strip() for w in decoded
             if len(w.strip()) > 3 and not all(c in "0123456789abcdefABCDEF" for c in w)
         ]
-        return " ".join(cuvinte_utile[:120])[:max_chars]
+        return " ".join(useful[:120])[:max_chars]
     except Exception:
         return ""
 
@@ -128,25 +136,25 @@ def parse_torrent_file(filepath: Path) -> str:
         with open(filepath, "rb") as f:
             data = f.read(150000)
         info_idx = data.find(b"4:name")
-        nume_torrent = ""
+        torrent_name = ""
         if info_idx != -1:
             start = info_idx + 6
             colon = data.find(b":", start)
             length = int(data[start:colon])
-            nume_torrent = data[colon + 1: colon + 1 + length].decode("utf-8", "ignore")
-        strings_gasite = re.findall(rb"[\x20-\x7E]{5,}", data)
-        mostra = " | ".join(s.decode("utf-8", "ignore") for s in strings_gasite[:8])
-        return f"Torrent: {nume_torrent}\nConținut: {mostra}"[:MAX_TEXT_CHARS]
+            torrent_name = data[colon + 1: colon + 1 + length].decode("utf-8", "ignore")
+        strings_found = re.findall(rb"[\x20-\x7E]{5,}", data)
+        sample = " | ".join(s.decode("utf-8", "ignore") for s in strings_found[:8])
+        return f"Torrent: {torrent_name}\nContents: {sample}"[:MAX_TEXT_CHARS]
     except Exception:
-        return f"Fișier torrent: {filepath.name}"
+        return f"Torrent file: {filepath.name}"
 
 
 def parse_zip_file(filepath: Path) -> str:
     try:
         with zipfile.ZipFile(filepath, "r") as z:
-            return f"Arhivă ZIP: {filepath.name}\nFișiere: " + ", ".join(z.namelist()[:15])
+            return f"ZIP archive: {filepath.name}\nFiles: " + ", ".join(z.namelist()[:15])
     except Exception:
-        return f"Arhivă ZIP: {filepath.name}"
+        return f"ZIP archive: {filepath.name}"
 
 
 def read_text_file(filepath: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
@@ -162,7 +170,7 @@ def read_text_file(filepath: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
 
 
 def encode_pil_image(img: Image.Image) -> str:
-    """768px + JPEG q80 = inferență GPU ~2x mai rapidă."""
+    """768px + JPEG q80 = ~2x faster GPU inference."""
     if img.mode != "RGB":
         img = img.convert("RGB")
     img.thumbnail((768, 768))
@@ -172,7 +180,7 @@ def encode_pil_image(img: Image.Image) -> str:
 
 
 def extract_file_payload(filepath: Path):
-    """Intoarce (mode, payload): mode este 'image', 'text' sau 'unknown'."""
+    """Return (mode, payload): mode is 'image', 'text' or 'unknown'."""
     ext = filepath.suffix.lower()
     try:
         if ext in IMAGE_EXTENSIONS:
@@ -205,20 +213,20 @@ def extract_file_payload(filepath: Path):
                                 if cell.text.strip():
                                     slides_text.append(cell.text.strip())
             text = "\n".join(slides_text).strip()
-            return ("text", text[:MAX_TEXT_CHARS]) if len(text) > 10 else ("text", f"Prezentare: {filepath.stem}")
+            return ("text", text[:MAX_TEXT_CHARS]) if len(text) > 10 else ("text", f"Presentation: {filepath.stem}")
 
         elif ext == ".ppt":
             text = extract_strings_from_binary(filepath)
-            return "text", text if len(text) > 20 else f"Prezentare veche: {filepath.stem}"
+            return "text", text if len(text) > 20 else f"Legacy presentation: {filepath.stem}"
 
         elif ext == ".docx":
             d = docx.Document(filepath)
             text = "\n".join(p.text for p in d.paragraphs if p.text.strip())
-            return ("text", text[:MAX_TEXT_CHARS]) if len(text) > 10 else ("text", f"Document Word: {filepath.stem}")
+            return ("text", text[:MAX_TEXT_CHARS]) if len(text) > 10 else ("text", f"Word document: {filepath.stem}")
 
         elif ext == ".doc":
             text = extract_strings_from_binary(filepath)
-            return "text", text if len(text) > 20 else f"Document Word vechi: {filepath.stem}"
+            return "text", text if len(text) > 20 else f"Legacy Word document: {filepath.stem}"
 
         elif ext == ".xlsx":
             wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
@@ -238,27 +246,27 @@ def extract_file_payload(filepath: Path):
 
         elif ext in {".exe", ".msi"}:
             metadata = extract_strings_from_binary(filepath)
-            return "text", f"Executabil: {filepath.name}\nDate: {metadata}"
+            return "text", f"Executable: {filepath.name}\nMetadata: {metadata}"
 
         elif ext in MEDIA_EXTENSIONS:
-            return "text", f"Fișier Media: {filepath.name}"
+            return "text", f"Media file: {filepath.name}"
 
         elif ext in TEXT_EXTENSIONS:
             return "text", read_text_file(filepath)
 
         text = extract_strings_from_binary(filepath, max_chars=800)
-        return ("text", f"Fișier {ext}: {filepath.name}\n{text}") if text else ("unknown", None)
+        return ("text", f"File {ext}: {filepath.name}\n{text}") if text else ("unknown", None)
 
     except Exception as e:
-        print(f"  [!] Eroare extragere pe {filepath.name}: {e}")
+        print(f"  [!] Extraction error on {filepath.name}: {e}")
         return "unknown", None
 
 
 # =====================================================================
-# 4. APEL CĂTRE AI LOCAL + PARSARE JSON ROBUSTĂ
+# 4. LOCAL AI CALL + ROBUST JSON PARSING
 # =====================================================================
 def parse_ai_json(raw: str):
-    """Extrage primul obiect JSON valid din raspunsul modelului. Intoarce None la esec."""
+    """Extract the first valid JSON object from the model output. None on failure."""
     if not raw:
         return None
     text = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
@@ -278,13 +286,13 @@ def parse_ai_json(raw: str):
 def build_messages(mode: str, payload: str, original_filename: str, strict: bool = False):
     if mode == "image":
         user_content = [
-            {"type": "text", "text": f"Fișier: '{original_filename}'. Identifică emitentul/tipul și returnează JSON scurt."},
+            {"type": "text", "text": f"File: '{original_filename}'. Identify the issuer/type and return short JSON."},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{payload}"}},
         ]
     else:
-        user_content = f"Fișier: '{original_filename}'\n\n mostră:\n{payload}\n\nReturnează JSON scurt conform regulilor."
+        user_content = f"File: '{original_filename}'\n\nSample:\n{payload}\n\nReturn short JSON per the rules."
     if strict:
-        user_content += "\nRĂSPUNDE DOAR CU OBIECTUL JSON, FĂRĂ TEXT ÎN JUR, FĂRĂ ```, NEAPĂRAT COMPLET (toate cele 4 chei)."
+        user_content += "\nRESPOND ONLY WITH THE JSON OBJECT, NO TEXT AROUND IT, NO ```, MUST BE COMPLETE (all 4 keys)."
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
@@ -292,7 +300,7 @@ def build_messages(mode: str, payload: str, original_filename: str, strict: bool
 
 
 def ask_local_ai(client, model: str, mode: str, payload: str, original_filename: str) -> dict:
-    """Un apel + o reîncercare cu max_tokens mai mare dacă JSON-ul e trunchiat/invalid."""
+    """One call + one retry with more tokens if the JSON came out truncated/invalid."""
     for strict, max_tokens in ((False, MAX_TOKENS), (True, MAX_TOKENS_RETRY)):
         try:
             response = client.chat.completions.create(
@@ -306,9 +314,9 @@ def ask_local_ai(client, model: str, mode: str, payload: str, original_filename:
             if data is not None:
                 data["ai_ok"] = True
                 return data
-            print(f"  [!] JSON invalid la {original_filename} (încercarea {2 if strict else 1}), reiau...")
+            print(f"  [!] Invalid JSON for {original_filename} (attempt {2 if strict else 1}), retrying...")
         except Exception as e:
-            print(f"  [EROARE AI la {original_filename}]: {e}")
+            print(f"  [AI ERROR on {original_filename}]: {e}")
             break
     return {
         "categorie": "Unknown",
@@ -320,29 +328,29 @@ def ask_local_ai(client, model: str, mode: str, payload: str, original_filename:
 
 
 # =====================================================================
-# 5. LOGICA DE CLASIFICARE / NUMIRE
+# 5. CLASSIFICATION / NAMING LOGIC
 # =====================================================================
 def junk_reason(file_path: Path):
-    """Intoarce motivul pentru care fișierul merge direct în 'to be deleted', altfel None."""
+    """Return the reason a file goes straight to 'to be deleted', else None."""
     if any(part in IGNORED_DIRS for part in file_path.parts):
-        return "director_ignorat"
+        return "ignored_dir"
     if file_path.suffix.lower() in JUNK_EXTENSIONS:
-        return "extensie_junk"
+        return "junk_extension"
     try:
         if file_path.stat().st_size < MIN_FILE_SIZE:
-            return "prea_mic"
+            return "too_small"
     except OSError:
-        return "stat_esuat"
+        return "stat_failed"
     return None
 
 
 def build_final_name(res: dict, orig_stem: str, orig_ext: str) -> str:
     nume_nou = clean_name(res.get("nume_nou", ""), max_len=55)
     keep_orig = bool(res.get("pastreaza_original", False))
-    curat_orig_stem = clean_name(orig_stem, max_len=50)
-    if keep_orig or not nume_nou or nume_nou.lower() == curat_orig_stem.lower():
-        return f"{curat_orig_stem}{orig_ext}"
-    return f"{nume_nou} ({curat_orig_stem}){orig_ext}"
+    clean_orig_stem = clean_name(orig_stem, max_len=50)
+    if keep_orig or not nume_nou or nume_nou.lower() == clean_orig_stem.lower():
+        return f"{clean_orig_stem}{orig_ext}"
+    return f"{nume_nou} ({clean_orig_stem}){orig_ext}"
 
 
 def resolve_target_folder(dest_path: Path, res: dict) -> Path:
@@ -356,7 +364,7 @@ def load_processed(log_file: str) -> set:
     if os.path.exists(log_file):
         with open(log_file, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.reader(f)
-            next(reader, None)  # header
+            next(reader, None)  # header row is skipped, so old Romanian-header logs still resume fine
             for row in reader:
                 if row and row[0]:
                     processed.add(normalize_path(row[0].strip()))
@@ -364,17 +372,17 @@ def load_processed(log_file: str) -> set:
 
 
 # =====================================================================
-# 6. BUCLA PRINCIPALĂ
+# 6. MAIN LOOP
 # =====================================================================
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Sortare AI non-destructivă a fișierelor cu VLM local.")
-    p.add_argument("--source", default=DEFAULT_SOURCE, help="Directorul sursă (default: %(default)s)")
-    p.add_argument("--dest", default=DEFAULT_DEST, help="Directorul destinație (default: %(default)s)")
-    p.add_argument("--log", default=None, help="Fișier CSV log (default: <dest>/sorting_log.csv)")
-    p.add_argument("--api-url", default=DEFAULT_API_URL, help="Endpoint OpenAI-compatibil (default: %(default)s)")
-    p.add_argument("--model", default=None, help="Numele modelului (default: primul model de pe server)")
-    p.add_argument("--limit", type=int, default=0, help="Procesează doar primele N fișiere neprocesate (0 = toate)")
-    p.add_argument("--dry-run", action="store_true", help="Doar afișează deciziile AI, nu copiază nimic și nu scrie în log")
+    p = argparse.ArgumentParser(description="Non-destructive AI file sorting with a local VLM.")
+    p.add_argument("--source", default=DEFAULT_SOURCE, help="Source directory (default: %(default)s)")
+    p.add_argument("--dest", default=DEFAULT_DEST, help="Destination directory (default: %(default)s)")
+    p.add_argument("--log", default=None, help="CSV log file (default: <dest>/sorting_log.csv)")
+    p.add_argument("--api-url", default=DEFAULT_API_URL, help="OpenAI-compatible endpoint (default: %(default)s)")
+    p.add_argument("--model", default=None, help="Model name (default: first model on the server)")
+    p.add_argument("--limit", type=int, default=0, help="Process only the first N unprocessed files (0 = all)")
+    p.add_argument("--dry-run", action="store_true", help="Only print AI decisions; copy nothing and write no log")
     return p.parse_args(argv)
 
 
@@ -382,8 +390,8 @@ def open_log_safely(log_file: str):
     try:
         return open(log_file, "a", newline="", encoding="utf-8-sig")
     except PermissionError:
-        print(f"[!] Nu pot deschide {log_file} — este posibil să fie deschis în Excel sau să ruleze alt proces Python.")
-        print("    Închide fișierul și reîncearcă.")
+        print(f"[!] Cannot open {log_file} — it may be open in Excel or another Python process is running.")
+        print("    Close the file and try again.")
         raise SystemExit(1)
 
 
@@ -394,10 +402,11 @@ def main(argv=None, client=None):
     dest_path = Path(args.dest)
     log_file = args.log or str(dest_path / "sorting_log.csv")
     errors_file = str(dest_path / "sorting_errors.csv")
+    # Folder name kept in English on purpose: existing Sorted output already uses it.
     delete_path = dest_path / "to be deleted"
 
     if not source_path.is_dir():
-        print(f"[!] Eroare: folderul sursă {args.source} nu există!")
+        print(f"[!] Error: source folder {args.source} does not exist!")
         return 1
 
     os.makedirs(win_long_path(dest_path), exist_ok=True)
@@ -408,19 +417,19 @@ def main(argv=None, client=None):
     model = args.model
     if model is None:
         try:
-            modele = client.models.list()
-            model = modele.data[0].id if modele.data else "local-model"
-            print(f"-> Conectat la {args.api_url}. Model activ: {model}")
+            models = client.models.list()
+            model = models.data[0].id if models.data else "local-model"
+            print(f"-> Connected to {args.api_url}. Active model: {model}")
         except Exception as e:
-            print(f"Atenție la conexiunea cu serverul ({e}); folosesc 'local-model'.")
+            print(f"Warning: could not reach the server ({e}); using 'local-model'.")
             model = "local-model"
 
     processed_files = load_processed(log_file)
-    print(f"Reluare proces: {len(processed_files)} fișiere au fost deja sortate.")
+    print(f"Resume: {len(processed_files)} files already sorted.")
 
     all_files = [p for p in source_path.rglob("*") if p.is_file()]
     total = len(all_files)
-    print(f"S-au găsit {total} fișiere în {args.source}.\n")
+    print(f"Found {total} files in {args.source}.\n")
 
     log_f = None
     writer = None
@@ -430,11 +439,11 @@ def main(argv=None, client=None):
         log_f = open_log_safely(log_file)
         writer = csv.writer(log_f)
         if not processed_files and (not os.path.exists(log_file) or os.path.getsize(log_file) == 0):
-            writer.writerow(["Cale_Originala", "Mod", "Categorie", "Subiect", "Cale_Noua"])
+            writer.writerow(["Source_Path", "Mode", "Category", "Subject", "New_Path"])
         errors_f = open(errors_file, "a", newline="", encoding="utf-8-sig")
         errors_writer = csv.writer(errors_f)
         if os.path.getsize(errors_file) == 0:
-            errors_writer.writerow(["Cale_Originala", "Eroare"])
+            errors_writer.writerow(["Source_Path", "Error"])
 
     ignored_counter = 0
     ai_counter = 0
@@ -443,7 +452,7 @@ def main(argv=None, client=None):
     try:
         for idx, file_path in enumerate(all_files, start=1):
             if args.limit and done >= args.limit:
-                print(f"\nLimită atinsă (--limit {args.limit}).")
+                print(f"\nLimit reached (--limit {args.limit}).")
                 break
 
             str_path = str(file_path)
@@ -465,15 +474,15 @@ def main(argv=None, client=None):
                     ignored_counter += 1
                     done += 1
                 except Exception as e:
-                    print(f"  [!] Eroare junk {file_path.name}: {e}")
+                    print(f"  [!] Junk error on {file_path.name}: {e}")
                     if errors_writer:
                         errors_writer.writerow([str_path, f"junk: {e}"])
                         errors_f.flush()
                 if ignored_counter % 250 == 0:
-                    print(f"[{idx}/{total}] Copiat junk în 'to be deleted' (Total: {ignored_counter})...")
+                    print(f"[{idx}/{total}] Copied junk to 'to be deleted' (total: {ignored_counter})...")
                 continue
 
-            print(f"[{idx}/{total}] Procesez AI: {file_path.name}")
+            print(f"[{idx}/{total}] AI processing: {file_path.name}")
             mode, payload = extract_file_payload(file_path)
 
             if mode == "unknown" or not payload:
@@ -483,12 +492,12 @@ def main(argv=None, client=None):
                         print(f"  -> DRY-RUN Unknown: {file_path.name}")
                     else:
                         final = safe_copy(file_path, target, file_path.name)
-                        writer.writerow([str_path, "Necunoscut", "Unknown", "", str(final)])
+                        writer.writerow([str_path, "Unknown", "Unknown", "", str(final)])
                         log_f.flush()
-                        print(f"  -> Trimis în Unknown: {final.name}")
+                        print(f"  -> Sent to Unknown: {final.name}")
                     done += 1
                 except Exception as e:
-                    print(f"  [!] Eroare necunoscut {file_path.name}: {e}")
+                    print(f"  [!] Unknown-file error on {file_path.name}: {e}")
                     if errors_writer:
                         errors_writer.writerow([str_path, f"unknown: {e}"])
                         errors_f.flush()
@@ -508,19 +517,19 @@ def main(argv=None, client=None):
                     writer.writerow([str_path, mode, clean_name(res.get('categorie', ''), 25) or 'Unknown',
                                      clean_name(res.get('subiect', ''), 30), str(final)])
                     log_f.flush()
-                    print(f"  -> Sortat în: {rel} -> {final.name}")
+                    print(f"  -> Sorted into: {rel} -> {final.name}")
                 ai_counter += 1
                 done += 1
                 if ai_counter % 25 == 0:
-                    print(f"  ... {ai_counter} fișiere procesate cu AI până acum.")
+                    print(f"  ... {ai_counter} AI-processed files so far.")
             except Exception as e:
-                print(f"  [!] Eroare copiere {file_path.name}: {e}")
+                print(f"  [!] Copy error on {file_path.name}: {e}")
                 if errors_writer:
-                    errors_writer.writerow([str_path, f"copiere: {e}"])
+                    errors_writer.writerow([str_path, f"copy: {e}"])
                     errors_f.flush()
 
     except KeyboardInterrupt:
-        print("\n[!] Oprit de utilizator. Relansează scriptul pentru a continua de unde a rămas (resume automat).")
+        print("\n[!] Interrupted by user. Re-run the script to continue from where it left off (automatic resume).")
         return 130
     finally:
         if log_f:
@@ -528,10 +537,10 @@ def main(argv=None, client=None):
         if errors_f:
             errors_f.close()
 
-    print(f"\nGata! {ai_counter} fișiere procesate cu AI, {ignored_counter} junk, din {total} gasite.")
+    print(f"\nDone! {ai_counter} AI-processed, {ignored_counter} junk, out of {total} found.")
     if not args.dry_run:
         print(f"Log: {log_file}")
-        print(f"Erori (de reîncercat la următoarea rulare): {errors_file}")
+        print(f"Errors (retried on next run): {errors_file}")
     return 0
 
 
