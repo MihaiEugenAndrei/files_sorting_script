@@ -186,6 +186,22 @@ class TestEndToEnd:
         client = make_client_router()
         rc = main(["--source", str(src), "--dest", str(dest), "--model", "fake", "--limit", "1"], client=client)
         assert rc == 0
-        # doar primul fișier neprocesat a fost procesat (junk sau AI, în ordinea rglob)
+        # only the first unprocessed file was processed (junk or AI, in rglob order)
         rows = read_log(dest / "sorting_log.csv")
         assert len(rows) == 2  # header + 1
+
+    def test_pause_every(self, tmp_path, monkeypatch):
+        src = make_source(tmp_path)
+        dest = tmp_path / "out"
+        client = make_client_router()
+        pauses = {"n": 0}
+
+        def fake_input(prompt=""):
+            pauses["n"] += 1
+            return ""
+
+        monkeypatch.setattr("builtins.input", fake_input)
+        rc = main(["--source", str(src), "--dest", str(dest), "--model", "fake", "--pause-every", "1"], client=client)
+        assert rc == 0
+        assert pauses["n"] == 2  # 2 AI-processed files -> paused after each
+        assert len(client.calls) == 2

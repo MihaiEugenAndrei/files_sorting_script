@@ -39,11 +39,17 @@ python sort_files.py --limit 50
 :: dry-run: prints the AI decisions, copies nothing, writes no log
 python sort_files.py --dry-run --limit 100
 
+:: pause for confirmation every 50 AI-processed files (Ctrl+C still stops safely)
+python sort_files.py --pause-every 50
+
 :: statistics for the sorted folder
 python count_sorted_files.py --target "Z:\Sorted"
 ```
 
-Options: `--source --dest --log --api-url --model --limit --dry-run` (see `--help`).
+Options: `--source --dest --log --api-url --model --limit --pause-every --dry-run` (see `--help`).
+
+Pausing/stopping is always safe: every copied file is logged instantly, and re-running the
+script resumes automatically from `sorting_log.csv` (Ctrl+C, `--limit`, `--pause-every`).
 
 ## Sorting rules
 

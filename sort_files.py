@@ -382,6 +382,7 @@ def parse_args(argv=None):
     p.add_argument("--api-url", default=DEFAULT_API_URL, help="OpenAI-compatible endpoint (default: %(default)s)")
     p.add_argument("--model", default=None, help="Model name (default: first model on the server)")
     p.add_argument("--limit", type=int, default=0, help="Process only the first N unprocessed files (0 = all)")
+    p.add_argument("--pause-every", type=int, default=0, help="Pause for Enter after every N AI-processed files (0 = never); Ctrl+C still stops safely and resumes next run")
     p.add_argument("--dry-run", action="store_true", help="Only print AI decisions; copy nothing and write no log")
     return p.parse_args(argv)
 
@@ -522,6 +523,8 @@ def main(argv=None, client=None):
                 done += 1
                 if ai_counter % 25 == 0:
                     print(f"  ... {ai_counter} AI-processed files so far.")
+                if args.pause_every and ai_counter % args.pause_every == 0:
+                    input(f"\n[PAUSE] {ai_counter} AI-processed files so far. Press Enter to continue, Ctrl+C to stop (auto-resume on next run)...")
             except Exception as e:
                 print(f"  [!] Copy error on {file_path.name}: {e}")
                 if errors_writer:
