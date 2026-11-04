@@ -77,6 +77,20 @@ python -m pytest tests/ -q
 
 Testele rulează local, fără server AI (client OpenAI mock) și fără căi `Z:\`.
 
+## Troubleshooting: "Import could not be resolved" in VS Code
+
+Pylance shows `reportMissingImports` for `openpyxl` / `openai` / `PIL` / `pymupdf` / `docx` / `pptx`
+when the selected interpreter is not the one where the dependencies were installed
+(e.g. a stray `python.exe` picked from somewhere on disk). These are editor warnings only —
+the script still runs fine from an interpreter that has the packages. To fix:
+
+1. `Ctrl+Shift+P` → **Python: Select Interpreter** → choose your global Python 3.13
+   (find its path in a terminal with: `py -3.13 -c "import sys; print(sys.executable)"`).
+2. Or install the deps into the currently selected interpreter instead:
+   `python -m pip install -r requirements.txt`
+3. Verify: `python -c "import openai, pymupdf, docx, pptx, openpyxl, PIL; print('ok')"`
+4. If the warnings persist after switching: `Ctrl+Shift+P` → **Developer: Reload Window**.
+
 ## Istoric (față de varianta din chat-ul Gemini)
 
 1. Copierile eșuate nu mai sunt logate ca "procesate" — se reîncearcă la relansare
